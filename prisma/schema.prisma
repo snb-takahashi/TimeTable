@@ -82,6 +82,10 @@ model Subject {
 model Teacher {
   id             String       @id @default(cuid())
   name           String
+  // 非常勤: part-time/adjunct teachers should have their periods kept
+  // contiguous each day and be scheduled on as few distinct days as
+  // possible, unlike full-time teachers.
+  isPartTime     Boolean      @default(false)
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 

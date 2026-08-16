@@ -42,9 +42,14 @@ async function runAutoGenerate(formData: FormData) {
 
   revalidatePath("/admin/timetable");
   if (result.success) {
-    const message = result.relaxedDailyCap
-      ? `時間割を自動生成しました(${result.placedCount}コマ配置)。一部のクラスは1日3コマの上限内に収まらず、上限を超えて配置しました。`
-      : `時間割を自動生成しました(${result.placedCount}コマ配置)。`;
+    const notes: string[] = [];
+    if (result.relaxedDailyCap) {
+      notes.push("一部のクラスは1日3コマの上限内に収まらず、上限を超えて配置しました。");
+    }
+    if (result.relaxedTeacherContiguity) {
+      notes.push("一部の非常勤教員はコマを連続・出勤日数最小にできず、通常どおりの配置になりました。");
+    }
+    const message = `時間割を自動生成しました(${result.placedCount}コマ配置)。${notes.join("")}`;
     redirect(`/admin/timetable?classId=${classGroupId}&notice=${encodeURIComponent(message)}`);
   }
   redirect(`/admin/timetable?classId=${classGroupId}&error=${encodeURIComponent(result.reason)}`);

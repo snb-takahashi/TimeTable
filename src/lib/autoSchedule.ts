@@ -12,7 +12,7 @@ type Lesson = {
 type Placement = { lesson: Lesson; slotId: string; roomId: string };
 
 export type GenerateResult =
-  | { success: true; placedCount: number; relaxedDailyCap: boolean }
+  | { success: true; placedCount: number; relaxedDailyCap: boolean; relaxedTeacherContiguity: boolean }
   | { success: false; reason: string };
 
 const MAX_BACKTRACK_STEPS = 300_000;
@@ -28,17 +28,23 @@ const MAX_ATTEMPTS_PER_PASS = 6;
  * can only be added if it's immediately before or after the periods that
  * class already has that day (e.g. 2,3,4 is fine; 2,4 with a gap at 3 is
  * not), so there's never a free period in the middle of a class's day. The
- * block can start anywhere, not just period 1. On top of that, each class
- * is capped at MAX_PERIODS_PER_DAY per day; if that cap makes the whole
- * curriculum infeasible, generation is retried once with the cap lifted
- * (contiguity is always kept) so a schedule is still produced where
- * possible.
+ * block can start anywhere, not just period 1. Classes are also capped at
+ * MAX_PERIODS_PER_DAY per day where possible.
+ *
+ * Part-time (非常勤) teachers get the same contiguous-day treatment applied
+ * to their own schedule, plus a preference for reusing days they're already
+ * on campus for, so their week is concentrated into as few days as
+ * possible. If satisfying every rule at once is infeasible, generation
+ * falls back in stages — first lifting the daily class cap, then (only as a
+ * last resort) lifting the part-time contiguity requirement — so a
+ * schedule is still produced where possible.
  */
 export async function generateSchedule(organizationId: string): Promise<GenerateResult> {
-  const [requirements, timeSlots, rooms, unavailability] = await Promise.all([
+  const [requirements, timeSlots, rooms, teachers, unavailability] = await Promise.all([
     prisma.curriculumRequirement.findMany({ where: { organizationId } }),
     prisma.timeSlot.findMany({ where: { organizationId } }),
     prisma.room.findMany({ where: { organizationId } }),
+    prisma.teacher.findMany({ where: { organizationId } }),
     prisma.teacherUnavailability.findMany({ where: { organizationId } }),
   ]);
 
@@ -51,6 +57,8 @@ export async function generateSchedule(organizationId: string): Promise<Generate
   if (rooms.length === 0) {
     return { success: false, reason: "教室が登録されていません。" };
   }
+
+  const partTimeTeacherIds = new Set(teachers.filter((t) => t.isPartTime).map((t) => t.id));
 
   const lessons: Lesson[] = requirements.flatMap((req) =>
     Array.from({ length: req.periodsPerWeek }, () => ({
@@ -91,7 +99,7 @@ export async function generateSchedule(organizationId: string): Promise<Generate
   // well within budget. Retry a few times with the tie-breaks reshuffled
   // (the primary teacher-constrained-first key is kept via a stable sort)
   // before concluding a pass is genuinely infeasible.
-  function attemptPass(maxPeriodsPerDay: number): Placement[] | null {
+  function attemptPass(maxPeriodsPerDay: number, enforceTeacherContiguity: boolean): Placement[] | null {
     for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_PASS; attempt++) {
       const shuffled = shuffle([...lessons]);
       const orderedLessons = shuffled
@@ -111,18 +119,36 @@ export async function generateSchedule(organizationId: string): Promise<Generate
         slotByDayPeriod,
         days,
         periodsByDay,
-        maxPeriodsPerDay
+        maxPeriodsPerDay,
+        partTimeTeacherIds,
+        enforceTeacherContiguity
       );
       if (result) return result;
     }
     return null;
   }
 
-  let assignment = attemptPass(MAX_PERIODS_PER_DAY);
+  // Try hardest to keep both rules; relax the class daily cap before ever
+  // giving up on part-time teacher contiguity, since that one was asked for
+  // unconditionally.
+  let assignment = attemptPass(MAX_PERIODS_PER_DAY, true);
   let relaxedDailyCap = false;
+  let relaxedTeacherContiguity = false;
+
   if (!assignment) {
-    assignment = attemptPass(Infinity);
-    relaxedDailyCap = assignment !== null;
+    assignment = attemptPass(Infinity, true);
+    if (assignment) relaxedDailyCap = true;
+  }
+  if (!assignment) {
+    assignment = attemptPass(MAX_PERIODS_PER_DAY, false);
+    if (assignment) relaxedTeacherContiguity = true;
+  }
+  if (!assignment) {
+    assignment = attemptPass(Infinity, false);
+    if (assignment) {
+      relaxedDailyCap = true;
+      relaxedTeacherContiguity = true;
+    }
   }
 
   if (!assignment) {
@@ -147,7 +173,7 @@ export async function generateSchedule(organizationId: string): Promise<Generate
     }),
   ]);
 
-  return { success: true, placedCount: assignment.length, relaxedDailyCap };
+  return { success: true, placedCount: assignment.length, relaxedDailyCap, relaxedTeacherContiguity };
 }
 
 function shuffle<T>(arr: T[]): T[] {
@@ -161,6 +187,22 @@ function shuffle<T>(arr: T[]): T[] {
 type DayBlock = { min: number; max: number; count: number };
 type Candidate = { day: DayOfWeek; period: number; slot: TimeSlot };
 
+/** Periods that may extend an existing contiguous block, or any period in
+ * the day if the block hasn't started yet (subject to a count cap). */
+function contiguousOptions(
+  block: DayBlock | undefined,
+  day: DayOfWeek,
+  cap: number,
+  periodsByDay: Map<DayOfWeek, number[]>
+): number[] {
+  if (!block) return cap >= 1 ? (periodsByDay.get(day) ?? []) : [];
+  if (block.count >= cap) return [];
+  const options: number[] = [];
+  if (block.min - 1 >= 1) options.push(block.min - 1);
+  options.push(block.max + 1);
+  return options;
+}
+
 function solve(
   orderedLessons: Lesson[],
   rooms: Room[],
@@ -168,7 +210,9 @@ function solve(
   slotByDayPeriod: Map<string, TimeSlot>,
   days: DayOfWeek[],
   periodsByDay: Map<DayOfWeek, number[]>,
-  maxPeriodsPerDay: number
+  maxPeriodsPerDay: number,
+  partTimeTeacherIds: Set<string>,
+  enforceTeacherContiguity: boolean
 ): Placement[] | null {
   const dayIndex = new Map(DAY_ORDER.map((d, i) => [d, i]));
 
@@ -179,31 +223,47 @@ function solve(
   // period may only extend this run at either end, which is what keeps the
   // day gap-free regardless of which period the run started at.
   const classDayBlock = new Map<string, DayBlock>();
+  // Same idea, but for a part-time teacher's own day (only enforced as a
+  // hard constraint when enforceTeacherContiguity is true).
+  const teacherDayBlock = new Map<string, DayBlock>();
+  // How many periods a teacher already has on a given day, tracked
+  // regardless of contiguity enforcement — used to prefer days a part-time
+  // teacher is already on campus for, so their week concentrates into as
+  // few days as possible.
+  const teacherDayCount = new Map<string, number>();
   const assignment: Placement[] = new Array(orderedLessons.length);
 
   let steps = 0;
-
-  function periodsToTry(classGroupId: string, day: DayOfWeek): number[] {
-    const block = classDayBlock.get(`${classGroupId}-${day}`);
-    if (!block) {
-      return maxPeriodsPerDay >= 1 ? (periodsByDay.get(day) ?? []) : [];
-    }
-    if (block.count >= maxPeriodsPerDay) return [];
-    const options: number[] = [];
-    if (block.min - 1 >= 1) options.push(block.min - 1);
-    options.push(block.max + 1);
-    return options;
-  }
 
   function backtrack(index: number): boolean {
     if (index === orderedLessons.length) return true;
     if (++steps > MAX_BACKTRACK_STEPS) return false;
 
     const lesson = orderedLessons[index];
+    const teacherIsPartTime = partTimeTeacherIds.has(lesson.teacherId);
 
     const candidates: Candidate[] = [];
     for (const day of days) {
-      for (const period of periodsToTry(lesson.classGroupId, day)) {
+      const classOptions = contiguousOptions(
+        classDayBlock.get(`${lesson.classGroupId}-${day}`),
+        day,
+        maxPeriodsPerDay,
+        periodsByDay
+      );
+      if (classOptions.length === 0) continue;
+
+      let periods = classOptions;
+      if (enforceTeacherContiguity && teacherIsPartTime) {
+        const teacherOptions = contiguousOptions(
+          teacherDayBlock.get(`${lesson.teacherId}-${day}`),
+          day,
+          Infinity,
+          periodsByDay
+        );
+        periods = classOptions.filter((p) => teacherOptions.includes(p));
+      }
+
+      for (const period of periods) {
         const slot = slotByDayPeriod.get(`${day}-${period}`);
         if (!slot) continue;
         if (teacherBlockedSlots.has(`${lesson.teacherId}-${day}-${period}`)) continue;
@@ -213,13 +273,24 @@ function solve(
     }
 
     candidates.sort((a, b) => {
+      // For a part-time teacher, strongly prefer a day they're already
+      // scheduled on that week, to minimize how many days they commute in.
+      if (teacherIsPartTime) {
+        const aUsed = (teacherDayCount.get(`${lesson.teacherId}-${a.day}`) ?? 0) > 0 ? 0 : 1;
+        const bUsed = (teacherDayCount.get(`${lesson.teacherId}-${b.day}`) ?? 0) > 0 ? 0 : 1;
+        if (aUsed !== bUsed) return aUsed - bUsed;
+      }
       // Prefer days that don't already have this subject for this class,
       // so lessons spread across the week instead of stacking on one day.
       const aRepeats = classDaySubjectUsed.has(`${lesson.classGroupId}-${a.day}-${lesson.subjectId}`) ? 1 : 0;
       const bRepeats = classDaySubjectUsed.has(`${lesson.classGroupId}-${b.day}-${lesson.subjectId}`) ? 1 : 0;
       if (aRepeats !== bRepeats) return aRepeats - bRepeats;
-      // Prefer the emptier day, which naturally spreads periods evenly
-      // across the week and helps stay under the daily cap.
+      // Prefer the class's least-filled day so far. Applied lesson by
+      // lesson, this round-robins periods across every available day
+      // instead of packing early days full first — which is what keeps
+      // every day touched (no 0-period days) and the week landing on a
+      // balanced, similar period count per day instead of a couple of
+      // lonely single-period days.
       const aFilled = classDayBlock.get(`${lesson.classGroupId}-${a.day}`)?.count ?? 0;
       const bFilled = classDayBlock.get(`${lesson.classGroupId}-${b.day}`)?.count ?? 0;
       if (aFilled !== bFilled) return aFilled - bFilled;
@@ -245,16 +316,34 @@ function solve(
         const teacherKey = `${lesson.teacherId}-${slot.id}`;
         const daySubjKey = `${lesson.classGroupId}-${day}-${lesson.subjectId}`;
         const daySubjAlreadyUsed = classDaySubjectUsed.has(daySubjKey);
-        const blockKey = `${lesson.classGroupId}-${day}`;
-        const prevBlock = classDayBlock.get(blockKey);
-        const newBlock: DayBlock = prevBlock
-          ? { min: Math.min(prevBlock.min, period), max: Math.max(prevBlock.max, period), count: prevBlock.count + 1 }
+
+        const classBlockKey = `${lesson.classGroupId}-${day}`;
+        const prevClassBlock = classDayBlock.get(classBlockKey);
+        const newClassBlock: DayBlock = prevClassBlock
+          ? {
+              min: Math.min(prevClassBlock.min, period),
+              max: Math.max(prevClassBlock.max, period),
+              count: prevClassBlock.count + 1,
+            }
           : { min: period, max: period, count: 1 };
+
+        const teacherBlockKey = `${lesson.teacherId}-${day}`;
+        const prevTeacherBlock = teacherDayBlock.get(teacherBlockKey);
+        const newTeacherBlock: DayBlock = prevTeacherBlock
+          ? {
+              min: Math.min(prevTeacherBlock.min, period),
+              max: Math.max(prevTeacherBlock.max, period),
+              count: prevTeacherBlock.count + 1,
+            }
+          : { min: period, max: period, count: 1 };
+        const prevTeacherDayCount = teacherDayCount.get(teacherBlockKey) ?? 0;
 
         teacherSlotUsed.add(teacherKey);
         roomSlotUsed.add(roomKey);
         classDaySubjectUsed.add(daySubjKey);
-        classDayBlock.set(blockKey, newBlock);
+        classDayBlock.set(classBlockKey, newClassBlock);
+        teacherDayBlock.set(teacherBlockKey, newTeacherBlock);
+        teacherDayCount.set(teacherBlockKey, prevTeacherDayCount + 1);
         assignment[index] = { lesson, slotId: slot.id, roomId: room.id };
 
         if (backtrack(index + 1)) return true;
@@ -262,8 +351,11 @@ function solve(
         teacherSlotUsed.delete(teacherKey);
         roomSlotUsed.delete(roomKey);
         if (!daySubjAlreadyUsed) classDaySubjectUsed.delete(daySubjKey);
-        if (prevBlock) classDayBlock.set(blockKey, prevBlock);
-        else classDayBlock.delete(blockKey);
+        if (prevClassBlock) classDayBlock.set(classBlockKey, prevClassBlock);
+        else classDayBlock.delete(classBlockKey);
+        if (prevTeacherBlock) teacherDayBlock.set(teacherBlockKey, prevTeacherBlock);
+        else teacherDayBlock.delete(teacherBlockKey);
+        teacherDayCount.set(teacherBlockKey, prevTeacherDayCount);
       }
     }
     return false;
