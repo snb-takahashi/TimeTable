@@ -1,7 +1,10 @@
 import Link from "next/link";
 
 const NAV = [
-  { href: "/admin/timetable", label: "時間割" },
+  { href: "/admin/timetable", label: "時間割(編集)" },
+  { href: "/admin/schedule/by-class", label: "クラス別時間割" },
+  { href: "/admin/schedule/by-teacher", label: "教員別時間割" },
+  { href: "/admin/schedule/by-room", label: "教室別時間割" },
   { href: "/admin/classes", label: "クラス" },
   { href: "/admin/subjects", label: "科目" },
   { href: "/admin/teachers", label: "教員" },
