@@ -109,8 +109,6 @@ model TimeSlot {
   id             String       @id @default(cuid())
   dayOfWeek      DayOfWeek
   periodNumber   Int
-  startTime      String
-  endTime        String
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id])
 
@@ -151,7 +149,9 @@ model TimetableEntry {
 
 // Describes what the auto-scheduler must place: this class needs this many
 // periods/week of this subject, taught by this teacher (optionally in a
-// preferred room). One row per (class, subject) pair.
+// preferred room). A (class, subject) pair can have multiple rows when the
+// subject is team-taught by more than one teacher (each with their own
+// periods/week share).
 model CurriculumRequirement {
   id             String       @id @default(cuid())
   organizationId String
@@ -171,7 +171,7 @@ model CurriculumRequirement {
   preferredRoomId String?
   preferredRoom   Room?   @relation(fields: [preferredRoomId], references: [id])
 
-  @@unique([classGroupId, subjectId])
+  @@unique([classGroupId, subjectId, teacherId])
 }
 
 // A teacher-specific blackout: this teacher cannot be scheduled at this

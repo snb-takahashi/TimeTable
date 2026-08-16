@@ -1,3 +1,5 @@
+import { CsvUploadForm } from "@/components/admin/CsvUploadForm";
+
 type Item = {
   id: string;
   name: string;
@@ -11,6 +13,9 @@ export function SimpleCrudSection({
   createAction,
   deleteAction,
   error,
+  notice,
+  csvUploadAction,
+  csvColumnsHint,
 }: {
   title: string;
   items: Item[];
@@ -18,6 +23,9 @@ export function SimpleCrudSection({
   createAction: (formData: FormData) => Promise<void>;
   deleteAction: (formData: FormData) => Promise<void>;
   error?: string;
+  notice?: string;
+  csvUploadAction?: (formData: FormData) => Promise<void>;
+  csvColumnsHint?: string;
 }) {
   return (
     <section className="max-w-xl">
@@ -27,6 +35,15 @@ export function SimpleCrudSection({
         <p className="mb-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
           {error}
         </p>
+      )}
+      {notice && (
+        <p className="mb-4 rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700">
+          {notice}
+        </p>
+      )}
+
+      {csvUploadAction && csvColumnsHint && (
+        <CsvUploadForm action={csvUploadAction} columnsHint={csvColumnsHint} />
       )}
 
       <ul className="mb-6 divide-y divide-gray-200 border border-gray-200 rounded">

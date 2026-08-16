@@ -1,20 +1,22 @@
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { getDefaultOrganization } from "@/lib/org";
+import { readCsvFile } from "@/lib/csv";
+import { isForeignKeyError } from "@/lib/prismaErrors";
+import { CsvUploadForm } from "@/components/admin/CsvUploadForm";
 import type { DayOfWeek } from "@prisma/client";
-import { DAY_LABELS, DAY_ORDER } from "@/lib/days";
+import { DAY_LABELS, DAY_ORDER, parseDayOfWeek } from "@/lib/days";
 
 async function createTimeSlot(formData: FormData) {
   "use server";
   const dayOfWeek = String(formData.get("dayOfWeek") ?? "") as DayOfWeek;
   const periodNumber = Number(formData.get("periodNumber"));
-  const startTime = String(formData.get("startTime") ?? "").trim();
-  const endTime = String(formData.get("endTime") ?? "").trim();
-  if (!dayOfWeek || !periodNumber || !startTime || !endTime) return;
+  if (!dayOfWeek || !periodNumber) return;
 
   const org = await getDefaultOrganization();
   await prisma.timeSlot.create({
-    data: { dayOfWeek, periodNumber, startTime, endTime, organizationId: org.id },
+    data: { dayOfWeek, periodNumber, organizationId: org.id },
   });
   revalidatePath("/admin/timeslots");
 }
@@ -23,11 +25,61 @@ async function deleteTimeSlot(formData: FormData) {
   "use server";
   const id = String(formData.get("id") ?? "");
   if (!id) return;
-  await prisma.timeSlot.delete({ where: { id } });
+  try {
+    await prisma.timeSlot.delete({ where: { id } });
+  } catch (e) {
+    if (isForeignKeyError(e)) {
+      redirect(
+        `/admin/timeslots?error=${encodeURIComponent(
+          "このコマは時間割で使用されているため削除できません。先に時間割からこのコマの割当を削除してください。"
+        )}`
+      );
+    }
+    throw e;
+  }
   revalidatePath("/admin/timeslots");
 }
 
-export default async function TimeSlotsPage() {
+async function importTimeSlotsCsv(formData: FormData) {
+  "use server";
+  const rows = await readCsvFile(formData.get("file"));
+  const org = await getDefaultOrganization();
+
+  let count = 0;
+  const errors: string[] = [];
+
+  for (const [i, row] of rows.entries()) {
+    const dayOfWeek = parseDayOfWeek(row["曜日"] ?? "");
+    const periodNumber = Number(row["時限"]);
+    if (!dayOfWeek || !periodNumber) {
+      errors.push(`${i + 2}行目: 曜日または時限が不正です`);
+      continue;
+    }
+    await prisma.timeSlot.upsert({
+      where: {
+        organizationId_dayOfWeek_periodNumber: { organizationId: org.id, dayOfWeek, periodNumber },
+      },
+      update: {},
+      create: { organizationId: org.id, dayOfWeek, periodNumber },
+    });
+    count++;
+  }
+
+  revalidatePath("/admin/timeslots");
+  const message =
+    `${count}件のコマを取り込みました。` +
+    (errors.length > 0 ? ` (エラー${errors.length}件: ${errors.slice(0, 5).join(" / ")})` : "");
+  redirect(
+    `/admin/timeslots?${errors.length > 0 ? "error" : "notice"}=${encodeURIComponent(message)}`
+  );
+}
+
+export default async function TimeSlotsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ notice?: string; error?: string }>;
+}) {
+  const { notice, error } = await searchParams;
   const org = await getDefaultOrganization();
   const slots = await prisma.timeSlot.findMany({
     where: { organizationId: org.id },
@@ -41,6 +93,19 @@ export default async function TimeSlotsPage() {
     <section className="max-w-xl">
       <h1 className="text-xl font-semibold mb-4">コマ(時限)</h1>
 
+      {error && (
+        <p className="mb-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p className="mb-4 rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700">
+          {notice}
+        </p>
+      )}
+
+      <CsvUploadForm action={importTimeSlotsCsv} columnsHint="曜日,時限" />
+
       <ul className="mb-6 divide-y divide-gray-200 border border-gray-200 rounded">
         {slots.length === 0 && (
           <li className="px-3 py-2 text-sm text-gray-500">まだ登録がありません</li>
@@ -51,8 +116,7 @@ export default async function TimeSlotsPage() {
             className="flex items-center justify-between px-3 py-2 text-sm"
           >
             <span>
-              {DAY_LABELS[slot.dayOfWeek]}曜 {slot.periodNumber}限（
-              {slot.startTime}〜{slot.endTime}）
+              {DAY_LABELS[slot.dayOfWeek]}曜 {slot.periodNumber}限
             </span>
             <form action={deleteTimeSlot}>
               <input type="hidden" name="id" value={slot.id} />
@@ -96,30 +160,6 @@ export default async function TimeSlotsPage() {
             min={1}
             required
             className="border border-gray-300 rounded px-2 py-1 text-sm w-16"
-          />
-        </div>
-        <div className="flex flex-col">
-          <label className="text-xs text-gray-600 mb-1" htmlFor="startTime">
-            開始
-          </label>
-          <input
-            id="startTime"
-            name="startTime"
-            type="time"
-            required
-            className="border border-gray-300 rounded px-2 py-1 text-sm"
-          />
-        </div>
-        <div className="flex flex-col">
-          <label className="text-xs text-gray-600 mb-1" htmlFor="endTime">
-            終了
-          </label>
-          <input
-            id="endTime"
-            name="endTime"
-            type="time"
-            required
-            className="border border-gray-300 rounded px-2 py-1 text-sm"
           />
         </div>
         <button

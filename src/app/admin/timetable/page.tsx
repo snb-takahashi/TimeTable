@@ -42,11 +42,10 @@ async function runAutoGenerate(formData: FormData) {
 
   revalidatePath("/admin/timetable");
   if (result.success) {
-    redirect(
-      `/admin/timetable?classId=${classGroupId}&notice=${encodeURIComponent(
-        `時間割を自動生成しました(${result.placedCount}コマ配置)。`
-      )}`
-    );
+    const message = result.relaxedDailyCap
+      ? `時間割を自動生成しました(${result.placedCount}コマ配置)。一部のクラスは1日3コマの上限内に収まらず、上限を超えて配置しました。`
+      : `時間割を自動生成しました(${result.placedCount}コマ配置)。`;
+    redirect(`/admin/timetable?classId=${classGroupId}&notice=${encodeURIComponent(message)}`);
   }
   redirect(`/admin/timetable?classId=${classGroupId}&error=${encodeURIComponent(result.reason)}`);
 }

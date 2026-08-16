@@ -56,26 +56,21 @@ async function main() {
   );
 
   const days: DayOfWeek[] = ["MON", "TUE", "WED", "THU", "FRI"];
-  const periods = [
-    { periodNumber: 1, startTime: "09:00", endTime: "09:50" },
-    { periodNumber: 2, startTime: "10:00", endTime: "10:50" },
-    { periodNumber: 3, startTime: "11:00", endTime: "11:50" },
-    { periodNumber: 4, startTime: "13:00", endTime: "13:50" },
-  ];
+  const periods = [1, 2, 3, 4];
 
   const timeSlots = [];
   for (const day of days) {
-    for (const p of periods) {
+    for (const periodNumber of periods) {
       const slot = await prisma.timeSlot.upsert({
         where: {
           organizationId_dayOfWeek_periodNumber: {
             organizationId: org.id,
             dayOfWeek: day,
-            periodNumber: p.periodNumber,
+            periodNumber,
           },
         },
         update: {},
-        create: { organizationId: org.id, dayOfWeek: day, ...p },
+        create: { organizationId: org.id, dayOfWeek: day, periodNumber },
       });
       timeSlots.push(slot);
     }
@@ -135,10 +130,13 @@ async function main() {
     for (const c of curriculum) {
       await prisma.curriculumRequirement.upsert({
         where: {
-          classGroupId_subjectId: { classGroupId: classGroup.id, subjectId: subjectByName[c.subject].id },
+          classGroupId_subjectId_teacherId: {
+            classGroupId: classGroup.id,
+            subjectId: subjectByName[c.subject].id,
+            teacherId: teacherByName[c.teacher].id,
+          },
         },
         update: {
-          teacherId: teacherByName[c.teacher].id,
           periodsPerWeek: c.periodsPerWeek,
           preferredRoomId: c.preferredRoom ? roomByName[c.preferredRoom].id : null,
         },
@@ -157,13 +155,13 @@ async function main() {
   // 高橋先生 (社会) is unavailable all day Friday, to demonstrate the
   // auto-scheduler respecting teacher constraints.
   const takahashi = teacherByName["高橋先生"];
-  for (const p of periods) {
+  for (const periodNumber of periods) {
     await prisma.teacherUnavailability.upsert({
       where: {
         teacherId_dayOfWeek_periodNumber: {
           teacherId: takahashi.id,
           dayOfWeek: "FRI",
-          periodNumber: p.periodNumber,
+          periodNumber,
         },
       },
       update: {},
@@ -171,7 +169,7 @@ async function main() {
         organizationId: org.id,
         teacherId: takahashi.id,
         dayOfWeek: "FRI",
-        periodNumber: p.periodNumber,
+        periodNumber,
       },
     });
   }
