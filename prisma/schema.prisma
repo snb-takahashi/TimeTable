@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // Local/dev uses SQLite for zero-setup development.
+  // For production, switch provider to "postgresql" and point DATABASE_URL
+  // at a managed Postgres instance (e.g. Neon), per the project plan.
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum DayOfWeek {
+  MON
+  TUE
+  WED
+  THU
+  FRI
+  SAT
+  SUN
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  timezone  String   @default("Asia/Tokyo")
+  createdAt DateTime @default(now())
+
+  users                  User[]
+  classGroups            ClassGroup[]
+  subjects               Subject[]
+  teachers               Teacher[]
+  rooms                  Room[]
+  timeSlots              TimeSlot[]
+  entries                TimetableEntry[]
+  curriculumRequirements CurriculumRequirement[]
+  teacherUnavailability  TeacherUnavailability[]
+}
+
+model User {
+  id             String       @id @default(cuid())
+  email          String       @unique
+  passwordHash   String
+  role           Role         @default(MEMBER)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime     @default(now())
+}
+
+model ClassGroup {
+  id             String       @id @default(cuid())
+  name           String
+  grade          String?
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  entries                TimetableEntry[]
+  curriculumRequirements CurriculumRequirement[]
+
+  @@unique([organizationId, name])
+}
+
+model Subject {
+  id             String       @id @default(cuid())
+  name           String
+  code           String?
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  entries                TimetableEntry[]
+  curriculumRequirements CurriculumRequirement[]
+
+  @@unique([organizationId, name])
+}
+
+model Teacher {
+  id             String       @id @default(cuid())
+  name           String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  entries                TimetableEntry[]
+  curriculumRequirements CurriculumRequirement[]
+  unavailability         TeacherUnavailability[]
+
+  @@unique([organizationId, name])
+}
+
+model Room {
+  id             String       @id @default(cuid())
+  name           String
+  capacity       Int?
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  entries                     TimetableEntry[]
+  preferredForRequirements    CurriculumRequirement[]
+
+  @@unique([organizationId, name])
+}
+
+model TimeSlot {
+  id             String       @id @default(cuid())
+  dayOfWeek      DayOfWeek
+  periodNumber   Int
+  startTime      String
+  endTime        String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  entries TimetableEntry[]
+
+  @@unique([organizationId, dayOfWeek, periodNumber])
+}
+
+model TimetableEntry {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  classGroupId String
+  classGroup   ClassGroup @relation(fields: [classGroupId], references: [id])
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id])
+
+  roomId String
+  room   Room   @relation(fields: [roomId], references: [id])
+
+  timeSlotId String
+  timeSlot   TimeSlot @relation(fields: [timeSlotId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  // Conflict prevention: a class, a teacher, and a room can each only
+  // appear once per time slot. The DB constraint is the source of truth;
+  // app code pre-checks these for a friendly error message.
+  @@unique([classGroupId, timeSlotId])
+  @@unique([teacherId, timeSlotId])
+  @@unique([roomId, timeSlotId])
+}
+
+// Describes what the auto-scheduler must place: this class needs this many
+// periods/week of this subject, taught by this teacher (optionally in a
+// preferred room). One row per (class, subject) pair.
+model CurriculumRequirement {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  classGroupId String
+  classGroup   ClassGroup @relation(fields: [classGroupId], references: [id])
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id])
+
+  periodsPerWeek Int
+
+  preferredRoomId String?
+  preferredRoom   Room?   @relation(fields: [preferredRoomId], references: [id])
+
+  @@unique([classGroupId, subjectId])
+}
+
+// A teacher-specific blackout: this teacher cannot be scheduled at this
+// day/period, regardless of class or subject.
+model TeacherUnavailability {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  teacherId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id])
+
+  dayOfWeek    DayOfWeek
+  periodNumber Int
+
+  @@unique([teacherId, dayOfWeek, periodNumber])
+}
