@@ -3,10 +3,9 @@ generator client {
 }
 
 datasource db {
-  // Local/dev uses SQLite for zero-setup development.
-  // For production, switch provider to "postgresql" and point DATABASE_URL
-  // at a managed Postgres instance (e.g. Neon), per the project plan.
-  provider = "sqlite"
+  // Production uses a managed Postgres instance (Neon). DATABASE_URL points
+  // at it both locally and in deployment.
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
