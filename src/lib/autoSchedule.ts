@@ -15,9 +15,18 @@ export type GenerateResult =
   | { success: true; placedCount: number; relaxedDailyCap: boolean; relaxedTeacherContiguity: boolean }
   | { success: false; reason: string };
 
-const MAX_BACKTRACK_STEPS = 300_000;
+const MAX_BACKTRACK_STEPS = 20_000;
 const MAX_PERIODS_PER_DAY = 3;
 const MAX_ATTEMPTS_PER_PASS = 6;
+// Additional retries (beyond MAX_ATTEMPTS_PER_PASS) spent specifically
+// searching for a placement where every strict class's used days all land
+// on exactly 2-3 periods, since that isn't something solve() can guarantee
+// on its own — it's checked afterwards and retried if violated.
+const MAX_STRICT_VALIDATION_ATTEMPTS = 80;
+// Classes whose weekly total is within this many periods must land on
+// exactly 2 or 3 periods on every day of the week — no exceptions.
+const STRICT_CAP_THRESHOLD = 15;
+const STRICT_MIN_PER_DAY = 2;
 
 /**
  * Regenerates the entire timetable for an organization from its curriculum
@@ -28,16 +37,24 @@ const MAX_ATTEMPTS_PER_PASS = 6;
  * can only be added if it's immediately before or after the periods that
  * class already has that day (e.g. 2,3,4 is fine; 2,4 with a gap at 3 is
  * not), so there's never a free period in the middle of a class's day. The
- * block can start anywhere, not just period 1. Classes are also capped at
- * MAX_PERIODS_PER_DAY per day where possible.
+ * block can start anywhere, not just period 1.
+ *
+ * Classes whose weekly total is at most STRICT_CAP_THRESHOLD must land on
+ * exactly 2 or 3 periods every day of the week (never 0, 1, or 4+) — this
+ * is enforced with no relaxation: such a class is always capped at
+ * MAX_PERIODS_PER_DAY, and a solution is only accepted once every one of
+ * its days actually reaches 2 or 3 (validated after solving, with retries).
+ * Classes above the threshold instead get a best-effort
+ * MAX_PERIODS_PER_DAY cap that's lifted only if the whole schedule would
+ * otherwise be infeasible.
  *
  * Part-time (非常勤) teachers get the same contiguous-day treatment applied
  * to their own schedule, plus a preference for reusing days they're already
  * on campus for, so their week is concentrated into as few days as
  * possible. If satisfying every rule at once is infeasible, generation
- * falls back in stages — first lifting the daily class cap, then (only as a
- * last resort) lifting the part-time contiguity requirement — so a
- * schedule is still produced where possible.
+ * falls back in stages — first lifting the daily class cap (for non-strict
+ * classes only), then (only as a last resort) lifting the part-time
+ * contiguity requirement — so a schedule is still produced where possible.
  */
 export async function generateSchedule(organizationId: string): Promise<GenerateResult> {
   const [requirements, timeSlots, rooms, teachers, unavailability] = await Promise.all([
@@ -94,13 +111,51 @@ export async function generateSchedule(organizationId: string): Promise<Generate
     ])
   );
 
+  const classTotals = new Map<string, number>();
+  for (const l of lessons) {
+    classTotals.set(l.classGroupId, (classTotals.get(l.classGroupId) ?? 0) + 1);
+  }
+  // Only classes whose total actually fits a 2-3/day pattern across the
+  // available days are eligible for strict enforcement — a class with too
+  // few periods to reach 2 on every day can't satisfy it no matter what.
+  const strictClassIds = new Set(
+    [...classTotals.entries()]
+      .filter(
+        ([, total]) => total <= STRICT_CAP_THRESHOLD && total >= STRICT_MIN_PER_DAY * days.length
+      )
+      .map(([classGroupId]) => classGroupId)
+  );
+
+  function violatesStrictRule(assignment: Placement[]): boolean {
+    if (strictClassIds.size === 0) return false;
+    const counts = new Map<string, number>();
+    const dayBySlotId = new Map<string, DayOfWeek>();
+    for (const s of timeSlots) dayBySlotId.set(s.id, s.dayOfWeek);
+    for (const p of assignment) {
+      if (!strictClassIds.has(p.lesson.classGroupId)) continue;
+      const day = dayBySlotId.get(p.slotId)!;
+      const key = `${p.lesson.classGroupId}-${day}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    for (const classGroupId of strictClassIds) {
+      for (const day of days) {
+        const n = counts.get(`${classGroupId}-${day}`) ?? 0;
+        if (n < STRICT_MIN_PER_DAY || n > MAX_PERIODS_PER_DAY) return true;
+      }
+    }
+    return false;
+  }
+
   // Most-constrained-first is a good default lesson order, but on a large
   // interlocking curriculum a single ordering can hit an unlucky dead end
   // well within budget. Retry a few times with the tie-breaks reshuffled
   // (the primary teacher-constrained-first key is kept via a stable sort)
-  // before concluding a pass is genuinely infeasible.
+  // before concluding a pass is genuinely infeasible. When strict classes
+  // are present, keep retrying beyond a bare success until one is found
+  // that also satisfies their exact 2-3/day requirement.
   function attemptPass(maxPeriodsPerDay: number, enforceTeacherContiguity: boolean): Placement[] | null {
-    for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_PASS; attempt++) {
+    const attempts = strictClassIds.size > 0 ? MAX_STRICT_VALIDATION_ATTEMPTS : MAX_ATTEMPTS_PER_PASS;
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const shuffled = shuffle([...lessons]);
       const orderedLessons = shuffled
         .map((lesson, i) => ({ lesson, i }))
@@ -121,33 +176,45 @@ export async function generateSchedule(organizationId: string): Promise<Generate
         periodsByDay,
         maxPeriodsPerDay,
         partTimeTeacherIds,
-        enforceTeacherContiguity
+        enforceTeacherContiguity,
+        strictClassIds
       );
-      if (result) return result;
+      if (result && !violatesStrictRule(result)) return result;
     }
     return null;
   }
 
   // Try hardest to keep both rules; relax the class daily cap before ever
   // giving up on part-time teacher contiguity, since that one was asked for
-  // unconditionally.
-  let assignment = attemptPass(MAX_PERIODS_PER_DAY, true);
+  // unconditionally. The daily cap relaxation only ever affects non-strict
+  // classes — strict classes always stay capped at MAX_PERIODS_PER_DAY and
+  // are additionally validated to never drop below 2.
+  //
+  // Enforcing teacher contiguity is only ever different from not enforcing
+  // it when a part-time teacher exists — with none, skip straight past
+  // those passes instead of burning a full retry budget on a pass that's
+  // statistically identical to the next one.
+  const hasPartTimeTeachers = partTimeTeacherIds.size > 0;
+  let assignment: Placement[] | null = null;
   let relaxedDailyCap = false;
   let relaxedTeacherContiguity = false;
 
-  if (!assignment) {
-    assignment = attemptPass(Infinity, true);
-    if (assignment) relaxedDailyCap = true;
+  if (hasPartTimeTeachers) {
+    assignment = attemptPass(MAX_PERIODS_PER_DAY, true);
+    if (!assignment) {
+      assignment = attemptPass(Infinity, true);
+      if (assignment) relaxedDailyCap = true;
+    }
   }
   if (!assignment) {
     assignment = attemptPass(MAX_PERIODS_PER_DAY, false);
-    if (assignment) relaxedTeacherContiguity = true;
+    if (assignment && hasPartTimeTeachers) relaxedTeacherContiguity = true;
   }
   if (!assignment) {
     assignment = attemptPass(Infinity, false);
     if (assignment) {
       relaxedDailyCap = true;
-      relaxedTeacherContiguity = true;
+      if (hasPartTimeTeachers) relaxedTeacherContiguity = true;
     }
   }
 
@@ -155,7 +222,9 @@ export async function generateSchedule(organizationId: string): Promise<Generate
     return {
       success: false,
       reason:
-        "制約を満たす時間割を作成できませんでした。教員の空きコマ・教室数・週コマ数の設定を見直してください。",
+        strictClassIds.size > 0
+          ? "制約を満たす時間割を作成できませんでした。特に週15コマ以内のクラスは1日2〜3コマ厳守のため、教員の空きコマ・教室数・週コマ数の設定を見直してください。"
+          : "制約を満たす時間割を作成できませんでした。教員の空きコマ・教室数・週コマ数の設定を見直してください。",
     };
   }
 
@@ -212,7 +281,8 @@ function solve(
   periodsByDay: Map<DayOfWeek, number[]>,
   maxPeriodsPerDay: number,
   partTimeTeacherIds: Set<string>,
-  enforceTeacherContiguity: boolean
+  enforceTeacherContiguity: boolean,
+  strictClassIds: Set<string>
 ): Placement[] | null {
   const dayIndex = new Map(DAY_ORDER.map((d, i) => [d, i]));
 
@@ -241,13 +311,17 @@ function solve(
 
     const lesson = orderedLessons[index];
     const teacherIsPartTime = partTimeTeacherIds.has(lesson.teacherId);
+    // Strict classes are always capped at MAX_PERIODS_PER_DAY, regardless
+    // of the pass's (possibly relaxed) cap — that relaxation is only ever
+    // meant for classes above STRICT_CAP_THRESHOLD.
+    const classCap = strictClassIds.has(lesson.classGroupId) ? MAX_PERIODS_PER_DAY : maxPeriodsPerDay;
 
     const candidates: Candidate[] = [];
     for (const day of days) {
       const classOptions = contiguousOptions(
         classDayBlock.get(`${lesson.classGroupId}-${day}`),
         day,
-        maxPeriodsPerDay,
+        classCap,
         periodsByDay
       );
       if (classOptions.length === 0) continue;
