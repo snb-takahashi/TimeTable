@@ -2,6 +2,11 @@ import { prisma } from "@/lib/db";
 import { getDefaultOrganization } from "@/lib/org";
 import { ScheduleGridTable } from "@/components/admin/ScheduleGridTable";
 
+// No searchParams/dynamic APIs are used, so Next.js would otherwise
+// statically prerender this page at build time and bake in whatever data
+// existed then, ignoring the actual database at request time.
+export const dynamic = "force-dynamic";
+
 export default async function ScheduleByTeacherPage() {
   const org = await getDefaultOrganization();
 
