@@ -35,7 +35,15 @@ export default async function ScheduleByClassPage() {
 
   return (
     <section>
-      <h1 className="text-xl font-semibold mb-4">クラス別時間割</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-semibold">クラス別時間割</h1>
+        <a
+          href="/api/export/schedule/by-class"
+          className="bg-gray-800 text-white rounded px-3 py-1.5 text-sm hover:bg-gray-900"
+        >
+          CSVダウンロード
+        </a>
+      </div>
       {classGroups.map((classGroup) => {
         const byTimeSlot = new Map(
           entries.filter((e) => e.classGroupId === classGroup.id).map((e) => [e.timeSlotId, e])

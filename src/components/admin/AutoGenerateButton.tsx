@@ -98,6 +98,12 @@ export function AutoGenerateButton({
         <h1 className="text-xl font-semibold">時間割</h1>
         <div className="flex items-center gap-3">
           {classSelector}
+          <a
+            href={`/api/export/timetable?classId=${classGroupId}`}
+            className="bg-gray-800 text-white rounded px-3 py-1.5 text-sm hover:bg-gray-900"
+          >
+            CSVダウンロード
+          </a>
           <form ref={formRef} action={action}>
             <input type="hidden" name="classGroupId" value={classGroupId} />
             <GenerateProgress

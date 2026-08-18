@@ -35,7 +35,15 @@ export default async function ScheduleByTeacherPage() {
 
   return (
     <section>
-      <h1 className="text-xl font-semibold mb-4">教員別時間割</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-semibold">教員別時間割</h1>
+        <a
+          href="/api/export/schedule/by-teacher"
+          className="bg-gray-800 text-white rounded px-3 py-1.5 text-sm hover:bg-gray-900"
+        >
+          CSVダウンロード
+        </a>
+      </div>
       {teachers.map((teacher) => {
         const byTimeSlot = new Map(
           entries.filter((e) => e.teacherId === teacher.id).map((e) => [e.timeSlotId, e])

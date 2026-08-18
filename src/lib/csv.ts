@@ -62,3 +62,24 @@ export async function readCsvFile(file: FormDataEntryValue | null): Promise<Reco
   const text = await file.text();
   return csvRowsToObjects(parseCsv(text));
 }
+
+/** Serializes rows into CSV text (CRLF lines, UTF-8 BOM so Excel opens
+ * Japanese text correctly without a manual encoding step). */
+export function toCsv(rows: string[][]): string {
+  const escapeField = (field: string) =>
+    /[",\r\n]/.test(field) ? `"${field.replace(/"/g, '""')}"` : field;
+  const body = rows.map((row) => row.map(escapeField).join(",")).join("\r\n");
+  return String.fromCharCode(0xfeff) + body + "\r\n";
+}
+
+/** Builds Content-Type/Content-Disposition headers for a CSV file download.
+ * HTTP header values must be ASCII, so a non-ASCII filename (e.g. Japanese)
+ * can't go directly in `filename=`— it's passed only via the RFC 5987
+ * `filename*=UTF-8''...` form, with a plain ASCII fallback name for clients
+ * that don't support it. */
+export function csvDownloadHeaders(filename: string): HeadersInit {
+  return {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="download.csv"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+  };
+}
