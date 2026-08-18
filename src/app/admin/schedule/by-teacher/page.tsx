@@ -20,6 +20,13 @@ export default async function ScheduleByTeacherPage() {
   if (timeSlots.length === 0) {
     return <p className="text-sm text-gray-600">まずコマ(時限)を登録してください。</p>;
   }
+  if (entries.length === 0) {
+    return (
+      <p className="text-sm text-gray-600">
+        まだ時間割が作成されていません(「時間割(編集)」から入力するか、自動生成してください)。
+      </p>
+    );
+  }
 
   return (
     <section>
