@@ -12,7 +12,13 @@ const POLL_INTERVAL_MS = 400;
 // the whole duration of the action — a manually-managed flag set inside a
 // <form action> callback runs as a low-priority transition update that
 // React can skip rendering entirely when the action ends in a redirect.
-function GenerateProgress({ onPendingChange }: { onPendingChange: (pending: boolean) => void }) {
+function GenerateProgress({
+  onPendingChange,
+  onRequestConfirm,
+}: {
+  onPendingChange: (pending: boolean) => void;
+  onRequestConfirm: () => void;
+}) {
   const { pending } = useFormStatus();
   const [percent, setPercent] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -50,7 +56,8 @@ function GenerateProgress({ onPendingChange }: { onPendingChange: (pending: bool
   if (!pending) {
     return (
       <button
-        type="submit"
+        type="button"
+        onClick={onRequestConfirm}
         className="bg-blue-600 text-white rounded px-3 py-1.5 text-sm cursor-pointer hover:bg-blue-700"
       >
         自動生成
@@ -82,6 +89,8 @@ export function AutoGenerateButton({
   notice?: string;
 }) {
   const [isRunning, setIsRunning] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
 
   return (
     <>
@@ -89,20 +98,12 @@ export function AutoGenerateButton({
         <h1 className="text-xl font-semibold">時間割</h1>
         <div className="flex items-center gap-3">
           {classSelector}
-          <form
-            action={action}
-            onSubmit={(e) => {
-              if (
-                !confirm(
-                  "学校全体の時間割をカリキュラム設定から自動生成します。既存の割当はすべて置き換えられます。よろしいですか?"
-                )
-              ) {
-                e.preventDefault();
-              }
-            }}
-          >
+          <form ref={formRef} action={action}>
             <input type="hidden" name="classGroupId" value={classGroupId} />
-            <GenerateProgress onPendingChange={setIsRunning} />
+            <GenerateProgress
+              onPendingChange={setIsRunning}
+              onRequestConfirm={() => setShowConfirm(true)}
+            />
           </form>
         </div>
       </div>
@@ -116,6 +117,40 @@ export function AutoGenerateButton({
         <p className="mb-4 rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700">
           {notice}
         </p>
+      )}
+
+      {showConfirm && (
+        // An in-app modal instead of window.confirm(): a native confirm()
+        // dialog inside the Electron desktop build has been observed to
+        // leave the window unable to receive further mouse input after the
+        // dialog closes, so the confirmation step is implemented entirely
+        // in React instead of relying on the browser's blocking dialog.
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="mx-4 max-w-sm rounded bg-white p-5 shadow-lg">
+            <p className="mb-4 text-sm text-gray-800">
+              学校全体の時間割をカリキュラム設定から自動生成します。既存の割当はすべて置き換えられます。よろしいですか?
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowConfirm(false)}
+                className="cursor-pointer rounded border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-50"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowConfirm(false);
+                  formRef.current?.requestSubmit();
+                }}
+                className="cursor-pointer rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700"
+              >
+                実行する
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

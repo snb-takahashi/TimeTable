@@ -242,12 +242,17 @@ export async function generateSchedule(
   }
 
   if (!assignment) {
+    // Unlike the checkFeasibility() cases above (which are structurally
+    // impossible no matter how placements are tried), reaching here only
+    // means every random ordering tried within this call's retry budget
+    // failed — a different shuffle on a later call can still succeed, so
+    // the message says so rather than implying the settings must change.
     return {
       success: false,
       reason:
         strictClassIds.size > 0
-          ? "制約を満たす時間割を作成できませんでした。特に週15コマ以内のクラスは1日2〜3コマ厳守のため、教員の空きコマ・教室数・週コマ数の設定を見直してください。"
-          : "制約を満たす時間割を作成できませんでした。教員の空きコマ・教室数・週コマ数の設定を見直してください。",
+          ? "制約を満たす時間割を作成できませんでした。特に週15コマ以内のクラスは1日2〜3コマ厳守のため、教員の空きコマ・教室数・週コマ数の設定を見直してください。なお、設定に問題がない場合でも、組み合わせによっては再度「自動生成」を実行すると成功することがあります。"
+          : "制約を満たす時間割を作成できませんでした。教員の空きコマ・教室数・週コマ数の設定を見直してください。なお、設定に問題がない場合でも、組み合わせによっては再度「自動生成」を実行すると成功することがあります。",
     };
   }
 
