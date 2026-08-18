@@ -56,7 +56,10 @@ const STRICT_MIN_PER_DAY = 2;
  * classes only), then (only as a last resort) lifting the part-time
  * contiguity requirement — so a schedule is still produced where possible.
  */
-export async function generateSchedule(organizationId: string): Promise<GenerateResult> {
+export async function generateSchedule(
+  organizationId: string,
+  onProgress?: (percent: number) => void
+): Promise<GenerateResult> {
   const [requirements, timeSlots, rooms, teachers, unavailability] = await Promise.all([
     prisma.curriculumRequirement.findMany({ where: { organizationId } }),
     prisma.timeSlot.findMany({ where: { organizationId } }),
@@ -98,6 +101,8 @@ export async function generateSchedule(organizationId: string): Promise<Generate
   if (feasibilityError) {
     return { success: false, reason: feasibilityError };
   }
+
+  onProgress?.(0);
 
   const slotByDayPeriod = new Map(timeSlots.map((s) => [`${s.dayOfWeek}-${s.periodNumber}`, s]));
   const days = DAY_ORDER.filter((d) => timeSlots.some((s) => s.dayOfWeek === d));
@@ -153,7 +158,10 @@ export async function generateSchedule(organizationId: string): Promise<Generate
   // before concluding a pass is genuinely infeasible. When strict classes
   // are present, keep retrying beyond a bare success until one is found
   // that also satisfies their exact 2-3/day requirement.
-  function attemptPass(maxPeriodsPerDay: number, enforceTeacherContiguity: boolean): Placement[] | null {
+  async function attemptPass(
+    maxPeriodsPerDay: number,
+    enforceTeacherContiguity: boolean
+  ): Promise<Placement[] | null> {
     const attempts = strictClassIds.size > 0 ? MAX_STRICT_VALIDATION_ATTEMPTS : MAX_ATTEMPTS_PER_PASS;
     for (let attempt = 0; attempt < attempts; attempt++) {
       const shuffled = shuffle([...lessons]);
@@ -167,7 +175,7 @@ export async function generateSchedule(organizationId: string): Promise<Generate
         })
         .map((x) => x.lesson);
 
-      const result = solve(
+      const result = await solve(
         orderedLessons,
         rooms,
         teacherBlockedSlots,
@@ -179,6 +187,14 @@ export async function generateSchedule(organizationId: string): Promise<Generate
         enforceTeacherContiguity,
         strictClassIds
       );
+
+      attemptsDone++;
+      onProgress?.(Math.min(99, Math.round((attemptsDone / totalPassBudget) * 100)));
+      // Each attempt can itself be CPU-heavy (up to MAX_BACKTRACK_STEPS), so
+      // yield to the event loop here — otherwise a concurrent progress-poll
+      // request would never get a chance to run until generation finishes.
+      await new Promise((resolve) => setImmediate(resolve));
+
       if (result && !violatesStrictRule(result)) return result;
     }
     return null;
@@ -195,23 +211,30 @@ export async function generateSchedule(organizationId: string): Promise<Generate
   // those passes instead of burning a full retry budget on a pass that's
   // statistically identical to the next one.
   const hasPartTimeTeachers = partTimeTeacherIds.size > 0;
+  // Upper bound on how many solve() attempts generation could spend across
+  // every pass that might run, used only to turn attempt count into a
+  // rough percentage for progress reporting — actual work is usually far
+  // less, since a pass stops as soon as it finds a valid assignment.
+  const attemptsPerPass = strictClassIds.size > 0 ? MAX_STRICT_VALIDATION_ATTEMPTS : MAX_ATTEMPTS_PER_PASS;
+  const totalPassBudget = attemptsPerPass * (hasPartTimeTeachers ? 4 : 2);
+  let attemptsDone = 0;
   let assignment: Placement[] | null = null;
   let relaxedDailyCap = false;
   let relaxedTeacherContiguity = false;
 
   if (hasPartTimeTeachers) {
-    assignment = attemptPass(MAX_PERIODS_PER_DAY, true);
+    assignment = await attemptPass(MAX_PERIODS_PER_DAY, true);
     if (!assignment) {
-      assignment = attemptPass(Infinity, true);
+      assignment = await attemptPass(Infinity, true);
       if (assignment) relaxedDailyCap = true;
     }
   }
   if (!assignment) {
-    assignment = attemptPass(MAX_PERIODS_PER_DAY, false);
+    assignment = await attemptPass(MAX_PERIODS_PER_DAY, false);
     if (assignment && hasPartTimeTeachers) relaxedTeacherContiguity = true;
   }
   if (!assignment) {
-    assignment = attemptPass(Infinity, false);
+    assignment = await attemptPass(Infinity, false);
     if (assignment) {
       relaxedDailyCap = true;
       if (hasPartTimeTeachers) relaxedTeacherContiguity = true;
@@ -242,6 +265,7 @@ export async function generateSchedule(organizationId: string): Promise<Generate
     }),
   ]);
 
+  onProgress?.(100);
   return { success: true, placedCount: assignment.length, relaxedDailyCap, relaxedTeacherContiguity };
 }
 
@@ -272,7 +296,13 @@ function contiguousOptions(
   return options;
 }
 
-function solve(
+// Backtracking steps between one event-loop yield — frequent enough that a
+// concurrent progress-poll request can actually get a turn to run (Node is
+// single-threaded, so without this a single heavy attempt would otherwise
+// starve every other request for its whole duration).
+const YIELD_EVERY_STEPS = 200;
+
+async function solve(
   orderedLessons: Lesson[],
   rooms: Room[],
   teacherBlockedSlots: Set<string>,
@@ -283,7 +313,7 @@ function solve(
   partTimeTeacherIds: Set<string>,
   enforceTeacherContiguity: boolean,
   strictClassIds: Set<string>
-): Placement[] | null {
+): Promise<Placement[] | null> {
   const dayIndex = new Map(DAY_ORDER.map((d, i) => [d, i]));
 
   const teacherSlotUsed = new Set<string>();
@@ -305,9 +335,12 @@ function solve(
 
   let steps = 0;
 
-  function backtrack(index: number): boolean {
+  async function backtrack(index: number): Promise<boolean> {
     if (index === orderedLessons.length) return true;
     if (++steps > MAX_BACKTRACK_STEPS) return false;
+    if (steps % YIELD_EVERY_STEPS === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
 
     const lesson = orderedLessons[index];
     const teacherIsPartTime = partTimeTeacherIds.has(lesson.teacherId);
@@ -420,7 +453,7 @@ function solve(
         teacherDayCount.set(teacherBlockKey, prevTeacherDayCount + 1);
         assignment[index] = { lesson, slotId: slot.id, roomId: room.id };
 
-        if (backtrack(index + 1)) return true;
+        if (await backtrack(index + 1)) return true;
 
         teacherSlotUsed.delete(teacherKey);
         roomSlotUsed.delete(roomKey);
@@ -435,7 +468,7 @@ function solve(
     return false;
   }
 
-  return backtrack(0) ? assignment : null;
+  return (await backtrack(0)) ? assignment : null;
 }
 
 function checkFeasibility(

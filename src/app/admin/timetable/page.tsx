@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { getDefaultOrganization } from "@/lib/org";
 import { checkConflicts } from "@/lib/conflicts";
 import { generateSchedule } from "@/lib/autoSchedule";
+import { setGenerationState } from "@/lib/generationProgress";
 import { ClassSelector } from "@/components/admin/ClassSelector";
 import { AutoGenerateButton } from "@/components/admin/AutoGenerateButton";
 import { DAY_LABELS, DAY_ORDER } from "@/lib/days";
@@ -38,10 +39,14 @@ async function runAutoGenerate(formData: FormData) {
   "use server";
   const classGroupId = String(formData.get("classGroupId") ?? "");
   const org = await getDefaultOrganization();
-  const result = await generateSchedule(org.id);
+  setGenerationState(org.id, { status: "running", percent: 0 });
+  const result = await generateSchedule(org.id, (percent) => {
+    setGenerationState(org.id, { status: "running", percent });
+  });
 
   revalidatePath("/admin/timetable");
   if (result.success) {
+    setGenerationState(org.id, { status: "done" });
     const notes: string[] = [];
     if (result.relaxedDailyCap) {
       notes.push("一部のクラスは1日3コマの上限内に収まらず、上限を超えて配置しました。");
@@ -52,6 +57,7 @@ async function runAutoGenerate(formData: FormData) {
     const message = `時間割を自動生成しました(${result.placedCount}コマ配置)。${notes.join("")}`;
     redirect(`/admin/timetable?classId=${classGroupId}&notice=${encodeURIComponent(message)}`);
   }
+  setGenerationState(org.id, { status: "error", message: result.reason });
   redirect(`/admin/timetable?classId=${classGroupId}&error=${encodeURIComponent(result.reason)}`);
 }
 
@@ -105,24 +111,13 @@ export default async function TimetablePage({
 
   return (
     <section>
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold">時間割</h1>
-        <div className="flex items-center gap-3">
-          <ClassSelector classGroups={classGroups} selectedClassId={selectedClassId} />
-          <AutoGenerateButton classGroupId={selectedClassId} action={runAutoGenerate} />
-        </div>
-      </div>
-
-      {error && (
-        <p className="mb-4 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
-        </p>
-      )}
-      {notice && (
-        <p className="mb-4 rounded border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-700">
-          {notice}
-        </p>
-      )}
+      <AutoGenerateButton
+        classGroupId={selectedClassId}
+        action={runAutoGenerate}
+        error={error}
+        notice={notice}
+        classSelector={<ClassSelector classGroups={classGroups} selectedClassId={selectedClassId} />}
+      />
 
       {timeSlots.length === 0 ? (
         <p className="text-sm text-gray-600">
